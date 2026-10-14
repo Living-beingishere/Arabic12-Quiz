@@ -344,6 +344,7 @@
     let selectedStudentData = null;
     let isExamLockedManual = false;
     let failedPasswordAttempts = 0;
+    let isSolavStudent = false;
 
     let questions = [
         {
@@ -532,7 +533,8 @@
         const letterInput = document.getElementById('studentLetter');
         
         const name = nameInput.value.trim();
-        const school = schoolInput.value.trim();const branch = branchSelect.value;
+        const school = schoolInput.value.trim();
+        const branch = branchSelect.value;
         const letter = letterInput.value.trim();
 
         const nameWords = name.split(/\s+/).filter(w => w.length > 0);
@@ -548,6 +550,11 @@
             return;
         }
 
+        // Check if student is from Solav
+        const lowerSchool = school.toLowerCase();
+        const validSchoolKeywords = ['سۆلاڤ', 'سۆلاف', 'solav', 'solaf'];
+        isSolavStudent = validSchoolKeywords.some(keyword => lowerSchool.includes(keyword));
+
         if (!letter) {
             alert('تکایە ناوی پۆڵەکەت بنووسە (ئەلف، ب، ج، د...).');
             letterInput.focus();
@@ -560,46 +567,49 @@
         btn.disabled = true;
         btn.innerText = "تکایە چاوەڕێ بکە...";
 
-        try {
-            const { data: existingRecords } = await supabaseClient
-                .from('exam_results')
-                .select('*')
-                .eq('student_name', name)
-                .eq('class_group', studentClass);
+        // Only check duplicates and save initial row in DB IF student is from Solav
+        if (isSolavStudent) {
+            try {
+                const { data: existingRecords } = await supabaseClient
+                    .from('exam_results')
+                    .select('*')
+                    .eq('student_name', name)
+                    .eq('class_group', studentClass);
 
-            if (existingRecords && existingRecords.length > 0) {
-                alert('ئەم ناوە سێیانییە پێشتر بەم پۆلەوە لە داتابەیس تۆمار کراوە! ناتوانیت دووبارە بەشداری بکەیت.');
-                localStorage.setItem('arabic_exam_done', 'true');
-                localStorage.setItem('arabic_exam_version', serverVersion);
-                localStorage.setItem('arabic_exam_score', existingRecords[0].score || 0);
-                localStorage.setItem('arabic_exam_answers', JSON.stringify(existingRecords[0].answers || []));
-                showRestrictedResult();
-                return;
+                if (existingRecords && existingRecords.length > 0) {
+                    alert('ئەم ناوە سێیانییە پێشتر بەم پۆلەوە لە داتابەیس تۆمار کراوە! ناتوانیت دووبارە بەشداری بکەیت.');
+                    localStorage.setItem('arabic_exam_done', 'true');
+                    localStorage.setItem('arabic_exam_version', serverVersion);
+                    localStorage.setItem('arabic_exam_score', existingRecords[0].score || 0);
+                    localStorage.setItem('arabic_exam_answers', JSON.stringify(existingRecords[0].answers || []));
+                    showRestrictedResult();
+                    return;
+                }
+            } catch (err) {
+                console.log("DB lookup error:", err);
             }
-        } catch (err) {
-            console.log("DB lookup error:", err);
+
+            try {
+                const { data: insertedData } = await supabaseClient
+                    .from('exam_results')
+                    .insert([{ 
+                        student_name: name, 
+                        class_group: studentClass, 
+                        score: 0, 
+                        answers: []
+                    }])
+                    .select();
+
+                if (insertedData && insertedData.length > 0) {
+                    currentRecordId = insertedData[0].id;
+                }
+            } catch (err) {}
         }
 
         localStorage.setItem('arabic_exam_done', 'true');
         localStorage.setItem('arabic_exam_version', serverVersion);
         localStorage.setItem('arabic_exam_answers', JSON.stringify([]));
         localStorage.setItem('arabic_exam_score', '0');
-
-        try {
-            const { data: insertedData } = await supabaseClient
-                .from('exam_results')
-                .insert([{ 
-                    student_name: name, 
-                    class_group: studentClass, 
-                    score: 0, 
-                    answers: []
-                }])
-                .select();
-
-            if (insertedData && insertedData.length > 0) {
-                currentRecordId = insertedData[0].id;
-            }
-        } catch (err) {}
 
         document.getElementById('register-form').classList.add('hidden');
         document.getElementById('quiz-form').classList.remove('hidden');
@@ -719,7 +729,8 @@
 
         document.getElementById('reviewContainer').innerHTML = reviewHTML;
 
-        if (currentRecordId) {
+        // ONLY save score to database if student is from Solav
+        if (isSolavStudent && currentRecordId) {
             supabaseClient
                 .from('exam_results')
                 .update({ score: score, answers: userAnswers })
@@ -898,7 +909,8 @@
         let studentAns = [];
         try {
             if (row.answers) {
-                studentAns = typeof row.answers === 'string' ? JSON.parse(row.answers) : row.answers;}
+                studentAns = typeof row.answers === 'string' ? JSON.parse(row.answers) : row.answers;
+            }
         } catch(e) {}
 
         let report = `📝 ڕاپۆرتی تاقیکردنەوەی زمانی عەرەبی\n`;
@@ -1071,7 +1083,8 @@
         let newQuestions = [];
         for (let i = 0; i < questions.length; i++) {
             const qText = document.getElementById(`q_text_${i}`).value.trim();
-            let qOpts = [];for (let j = 0; j < 4; j++) {
+            let qOpts = [];
+            for (let j = 0; j < 4; j++) {
                 const optInput = document.getElementById(`q_opt_${i}_${j}`);
                 if (optInput && optInput.value.trim() !== '') {
                     qOpts.push(optInput.value.trim());
@@ -1087,15 +1100,33 @@
             newQuestions.push({ question: qText, options: qOpts, answer: qAns });
         }
 
-        // 1. Fetch results and send to Telegram, then clear database
         try {
             const { data: resultsData } = await supabaseClient.from('exam_results').select('*');
             if (resultsData && resultsData.length > 0 && TELEGRAM_CHAT_ID !== "لێرە_چات_ایدی_مامۆستا_دانێ") {
-                let report = `📊 ڕاپۆرتی کۆتایی تاقیکردنەوەی پێشوو:\n\n`;
-                resultsData.forEach((row, index) => {
-                    report += `${index + 1}. قوتابی: ${row.student_name}\n`;
-                    report += `   پۆل: ${row.class_group}\n`;
-                    report += `   نمرە: ${row.score} لە ${questions.length}\n\n`;
+                
+                // Group results by class_group alphabetically (Poli A, Poli B, etc.)
+                let groupedResults = {};
+                resultsData.forEach(row => {
+                    const groupKey = row.class_group || 'نادیار';
+                    if (!groupedResults[groupKey]) {
+                        groupedResults[groupKey] = [];
+                    }
+                    groupedResults[groupKey].push(row);
+                });
+
+                // Sort group names alphabetically
+                const sortedGroupKeys = Object.keys(groupedResults).sort((a, b) => a.localeCompare(b, 'ku'));
+
+                let report = `📊 ڕاپۆرتی کۆتایی تاقیکردنەوەی پێشوو (بەپێی پۆلەکان):\n\n`;
+
+                sortedGroupKeys.forEach(groupName => {
+                    report += `📌 پۆلی: ${groupName}\n`;
+                    report += `----------------------------\n`;
+                    groupedResults[groupName].forEach((row, index) => {
+                        report += `${index + 1}. قوتابی: ${row.student_name}\n`;
+                        report += `   نمرە: ${row.score} لە ${questions.length}\n`;
+                    });
+                    report += `\n`;
                 });
 
                 await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -1108,7 +1139,6 @@
                 });
             }
 
-            // Clear database exam_results table so new exam starts clean
             await supabaseClient.from('exam_results').delete().neq('id', 0);
         } catch (e) {
             console.log("Telegram / Clear error:", e);
@@ -1126,7 +1156,7 @@
             localStorage.removeItem('arabic_exam_done');
             localStorage.removeItem('arabic_exam_version');
             failedPasswordAttempts = 0;
-            alert("پرسیارەکان پاشەکەوت کران، داتای پێشوو بۆ تێلیگرام نێردرا، داتابەیس پاککرایەوە و تاقیکردنەوەکە بۆ ٤٨ کاتژمێری نوێ دەستپێکرایەوە!");
+            alert("پرسیارەکان پاشەکەوت کران، داتای پێشوو بە ڕێکخراوی بۆ تێلیگرام نێردرا، داتابەیس پاککرایەوە و تاقیکردنەوەکە بۆ ٤٨ کاتژمێری نوێ دەستپێکرایەوە!");
             questions = newQuestions;
             currentExamUpdatedAt = nowIso;
             backToDashboardMain();
